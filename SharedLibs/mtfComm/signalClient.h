@@ -20,9 +20,11 @@ class signalClient
             toPrecaucion = 3,
             toRebaseAutorizado = 4
         };
-        signalClient(uint16_t chanel_id,uint8_t greenPort,uint8_t redPort, uint8_t yellowPort, uint8_t whitePort,typeOrder default_order);
+        signalClient();
 
+        void init(); //Ajusta los sentidos de salida y prepara las señales para la primera visualización.
         void setInverted(bool red, bool green, bool yellow, bool white); //Ajusta el mapa de inversiones.
+        void setDefaultOrder(typeOrder order);
         void setLedPort(typeColor color,uint8_t port);
         uint8_t getLedPort(typeColor color);
         uint16_t channel; //Número de canal (índice) en el array de señales que corresponde a esta señal.
@@ -33,9 +35,10 @@ class signalClient
         bool mcolInverted[4]; //Colección con las inversiones de los cuatro fuegos de una señal.
         uint8_t mcolLedPort[4]; //Colección con los cuatro fuegos de una señal.         
         typeOrder mvarOrder; //Última orden recibida
+        typeOrder mvarDefaultOrder; //Orden por defecto, nada más iniciar la señal.
 
     private:
         void auxSetOrder(); //Asigna la última orden recibida
-        void auxSetLight(uint8_t port, bool rhs); //Asigna la luz.
+        void auxSetLight(typeColor color, bool rhs); //Asigna la luz.
 };
 #endif

@@ -1,13 +1,18 @@
 #include "signalClient.h"
+#ifndef RECEIVER_MODULE
+#define RECEIVER_MODULE 0
+#define SIGNALS_COUNT 4
 
-//Receptor Marratxinet
 
+//Receptor universal de señales y agujas
 class receiver
 {
     public:
-        signalClient e11 = signalClient(3,22,23,24,25,signalClient::typeOrder::toParada);
-        signalClient e12 = signalClient(4,26,27,28,29,signalClient::typeOrder::toParada);
+        signalClient mcolSignals[SIGNALS_COUNT];
+        void init();
  
 };
+
+#endif
 
 

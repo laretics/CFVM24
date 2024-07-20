@@ -1,0 +1,15 @@
+{
+	"folders": [
+		{
+			"path": "../../../receptorMayo24"
+		},
+		{
+			"name": "receptorMayo24",
+			"path": ".."
+		},
+		{
+			"path": "../../SharedLibs/mtfComm"
+		}
+	],
+	"settings": {}
+}

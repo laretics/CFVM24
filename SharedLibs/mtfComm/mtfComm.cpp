@@ -2,34 +2,75 @@
 mtfComm::mtfComm()
 {
 	for(uint16_t i = 0; i<HEADER_COUNT;i++) mcolBuffer[i]=headerArray[i];
+	mcolBuffer[HEADER_COUNT]=1; //Comando de envío de estado.
 }
-void mtfComm::send()
-{
-	uint8_t auxCrc = calculateCRC();
-	mcolBuffer[BUFFER_LENGHT-1]=auxCrc;
-	PORT.write(mcolBuffer,BUFFER_LENGHT);
-}
-bool mtfComm::receive()
-{
-	if(PORT.available()<BUFFER_LENGHT) return false; //No hay datos suficientes.	
-	PORT.readBytes(mcolBuffer,BUFFER_LENGHT);
-	if(!syncHeader())
+bool mtfComm::serverSendStatus() 
+{ 
+	//Cada vez que llamamos a esta función vamos iterando
+	//por cada tipo de información. En tres llamadas hemos enviado todo.
+	switch (mvarStatusIterator)
 	{
-		return false; //Error de cabecera
-	} 
-	uint8_t auxCrc = calculateCRC();
-	#ifdef DEBUG_SERIAL
-	if(auxCrc!=mcolBuffer[BUFFER_LENGHT])
-	{
-		Serial.print(F("Error: Bad CRC. (Expected "));
-		Serial.print(auxCrc);
-		Serial.print(F(" and read "));
-		Serial.print(mcolBuffer[BUFFER_LENGHT-1]);
-		Serial.println(F(" )."));
+	case 0:
+		mvarStatusIterator++;
+		return serverSendCircuitLayout();
+		break;
+	case 1:
+		mvarStatusIterator++;
+		return serverSendCircuitStatus();
+	
+	default:
+		mvarStatusIterator=0;
+		return serverSendSignals();
+		break;
 	}
-	#endif	
-	return auxCrc==mcolBuffer[BUFFER_LENGHT-1];
 }
+
+void mtfComm::serverRequestClients()
+{
+	for (uint8_t i=0;i<NUM_CLIENTS;i++)
+	{
+		if(mcolDeviceStatus[i]>0)
+		{
+			if(!serverRequestClient(i)) 
+			{
+				mcolDeviceStatus[i]-=1; //Este dispositivo no ha contestado.
+			}
+		}
+	}
+}
+
+bool mtfComm::serverGetClientMessage()
+{
+	if(!readHeader()) //Error si no hay una cabecera válida
+	{
+		#ifdef DEBUG_SERIAL
+			Serial.println(F("Invalid header sent from client"));
+		#endif
+		return false;
+	}
+	//Comprobamos que el comando sea el correcto
+	switch (mvarCommandId)
+	{
+	case COMMAND_RECEIVE_CHANGES: //Es un mensaje de cambios
+		return serverGetClientChanges();
+		break;
+	
+	default:
+		#ifdef DEBUG_SERIAL
+			Serial.println(F("Wrong response from client."));
+			Serial.print(F("Unmanaged message command "));
+			Serial.print(mvarCommandId);
+			Serial.println(F(" received."));
+		#endif
+		return false;	
+		break;
+	}
+}
+
+
+
+
+
 void mtfComm::dumpMem()
 {
 	Serial.println(F("Serial buffer content:"));
@@ -90,36 +131,226 @@ uint8_t mtfComm::getSignalOrder(uint16_t index)
 	uint16_t auxIndex = HEADER_COUNT+(NUM_CIRCUIT*2)+index+1;
 	return mcolBuffer[auxIndex];
 }
-uint8_t mtfComm::calculateCRC()
+bool mtfComm::serverRequestClient(uint8_t clientId)
 {
-	uint8_t crc = 0;
-	for(uint16_t i=0; i<BUFFER_LENGHT-1;i++) crc^=mcolBuffer[i];
-	return crc;
-}
-bool mtfComm::syncHeader()
-{
-	for(uint16_t i=0; i< HEADER_COUNT;i++)
+	uint8_t tryouts = CLIENT_RECEIVE_TRYOUTS;
+	//Envía una petición de información al cliente
+	mvarCommandId = COMMAND_SEND_QUERY; //Petición de información
+	mvarHeaderData = clientId; //...dirigida al cliente [clientId]
+	if(!sendHeader()) return false; //Lo ha intentado y no ha podido.
+	PORT.write(mvarCRC); //Enviamos código de autocomprobación. En este tipo de datagrama no hay más info.
+	delay(100); //Damos tiempo a que el cliente conteste.
+
+	while (0<tryouts)
 	{
-		if(headerArray[i]!=mcolBuffer[i])
+		if(PORT.available()>5) //Al menos tiene que tener header, command y CRC... 5 bytes.
 		{
-			#ifdef DEBUG_SERIAL
-			Serial.print(F("Error: Bad header read. (Expected "));
-			for(int16_t i=0;i<HEADER_COUNT;i++)
+			if(serverGetClientChanges()) //Devuelve True en una recepción correcta, aunque sea sin cambios que reportar
 			{
-				Serial.print(headerArray[i]);
-				Serial.print(F(" "));
+				return true;
 			}
-			Serial.print(F("and read "));
-			for(int16_t i=0;i<HEADER_COUNT;i++)
-			{
-				Serial.print(mcolBuffer[i]);
-				Serial.print(F(" "));
-			}
-			Serial.println(F(")."));
-			Serial.println();
-			#endif			
-			return false;
 		}
+		delay(CLIENT_RECEIVE_TIMEOUT); //Esperamos antes de hacer el próximo reintento.
+		tryouts-=1;
 	}
-	return true;
+	return false; //No ha podido recibir nada del cliente
+}
+
+bool mtfComm::readHeader()
+{	
+	if(PORT.available>4)
+	{
+		//Comprobamos la cabecera
+		mvarCRC = 0; //Iniciamos CRC.
+		for(uint8_t i =0;i<HEADER_COUNT;i++)
+		{
+			if(headerArray[i]!=PORT.read())			
+			{
+				PORT.flush(); //Vacío lo que haya en el buffer para la próxima
+				#ifdef DEBUG_SERIAL
+					Serial.print(F("Error reading "));
+					Serial.print(i);
+					Serial.println(F(" header value on datagram sent."));
+				#endif
+				return false;
+			}
+			mvarCRC^=headerArray[i];
+		}
+		mvarCommandId = PORT.read();		
+		mvarHeaderData = PORT.read();
+		#ifdef DEBUG_SERIAL
+			Serial.println("Header received.")
+			Serial.print(F("Command Id: "));
+			Serial.println(mvarCommandId);
+			Serial.print(F("Header data: "));
+			Serial.println(mvarHeaderData);
+		#endif
+		mvarCRC^=mvarCommandId;
+		mvarCRC^=mvarHeaderData;
+		return true;
+	}
+	return false; //No puedo empezar a leer porque no hay info suficiente.
+}
+bool mtfComm::sendHeader()
+{
+	if(PORT.availableForWrite()>4)
+	{
+		mvarCRC = 0; //Iniciamos CRC.
+		PORT.write(headerArray,HEADER_COUNT);
+		for(uint8_t i =0;i<HEADER_COUNT;i++) {mvarCRC^=headerArray[i];}
+		PORT.write(mvarCommandId);
+		mvarCRC^=mvarCommandId;
+		PORT.write(mvarHeaderData);
+		mvarCRC^=mvarHeaderData;
+		#ifdef DEBUG_SERIAL
+			Serial.println("Header sent.")
+			Serial.print(F("Command Id: "));
+			Serial.println(mvarCommandId);
+			Serial.print(F("Header data: "));
+			Serial.println(mvarHeaderData);
+		#endif		
+		return true;
+	}
+	return false;
+}
+
+
+bool mtfComm::serverSendCircuitLayout()
+{
+	mvarCommandId=COMMAND_SEND_CIRCUIT_LAYOUT;
+	mvarHeaderData=mvarNumCircuits;
+	//Enviamos cabecera
+	if(sendHeader())
+	{
+		calculateCRC(&mcolCircuitLayout[0],mvarNumCircuits);
+		//Enviamos configuración de los circuitos
+		PORT.write(mcolCircuitLayout,mvarNumCircuits);
+		PORT.write(mvarCRC);
+		return true;
+	}
+	return false;
+}
+bool mtfComm::serverSendCircuitStatus()
+{
+	mvarCommandId=COMMAND_SEND_CIRCUIT_STATUS;
+	mvarHeaderData=mvarNumCircuits;
+	//Enviamos cabecera
+	if(sendHeader())		
+	{
+		calculateCRC(&mcolCircuitStatus[0],mvarNumCircuits);
+		PORT.write(mcolCircuitStatus,mvarNumCircuits);
+		PORT.write(mvarCRC);
+		return true;
+	}		
+	return false;
+}
+bool mtfComm::serverSendSignals()
+{
+	mvarCommandId=COMMAND_SEND_SIGNALS;
+	mvarElementsSet=mvarNumSignals;
+	//Enviamos cabecera
+	if(sendHeader())
+	{
+		calculateCRC(&mcolSignals[0],mvarNumSignals);
+		PORT.write(mcolSignals,mvarNumSignals);
+		PORT.write(mvarCRC);
+		return true;
+	}				
+	return false;
+}
+
+
+
+bool mtfComm::serverGetClientChanges()
+{	
+	//Hemos recibido la cabecera válida.
+	#ifdef DEBUG_SERIAL
+		Serial.print(F("Receiving "));
+		Serial.print(mvarHeaderData);
+		Serial.println(F(" circuit changes from client."));
+	#endif
+	uint8_t amount = PORT.available();
+	//El número de bytes tiene que ser mvarHeaderData*2 + 1
+	uint8_t minimum = (mvarHeaderData*2)+1;
+	if(amount < minimum)
+	{
+		#ifdef DEBUG_SERIAL
+			lowByteBufferReport(minimum,PORT.available());	
+		#endif
+		return false; //Nos salimos por no poder continuar.
+	}
+	//Leemos los datos en espera
+	for(uint8_t i=0; i< amount; i++) {mcolRequest[i] = PORT.read();}
+
+	//Comprobamos que el CRC es correcto
+	for (uint8_t i=0;i<amount-1;i++) {mvarCRC^=mcolRequest[i];}
+
+	if(mcolRequest[amount-1]!=mvarCRC)
+	{
+		//Error de comprobación de datos. No podemos procesar el paquete
+		#ifdef DEBUG_SERIAL
+			Serial.println(F("CRC error receiving changes from client."));
+		#endif		
+		return false;
+	}
+
+	//Procesamos la información
+	uint8_t auxIndex=0;
+	for(uint8_t i=0; i<mvarHeaderData;i++)
+	{				
+		serverProcessClientChange(mcolRequest[auxIndex++],mcolRequest[auxIndex++]);
+	}
+	return true; //Todo ha salido bien.
+}
+void mtfComm::serverProcessClientChange(uint8_t circuitId, uint8_t received)
+{
+	bool occupied = (received&128)!=0;
+	uint8_t newLayout = received&127;
+	bool changed = false;
+	//Actualizando layout
+	if(mcolCircuitLayout[circuitId]!=newLayout)
+	{
+		changed = true;
+		mcolCircuitLayout[circuitId]=newLayout;
+	}
+	//Actualizando estado
+	switch (mcolCircuitStatus[circuitId])
+	{
+	case /* constant-expression */:
+		/* code */
+		break;
+	
+	default:
+		break;
+	}
+
+}
+
+void mtfComm::lowByteBufferReport(uint8_t expected, uint8_t awaiting)
+{
+	Serial.println(F("Not enough data from sender."));
+	Serial.print(F("Expecting at least "));
+	Serial.print(expected);
+	Serial.print(F(" bytes and awaiting only "));
+	Serial.print(awaiting);
+	Serial.println(F(" bytes at serial port."));	
+}
+
+void mtfComm::calculateCRC(*uint8_t buffer, uint8_t size)
+{
+	for(uint16_t i=0; i<(size-1);i++) mvarCRC^=buffer[i];
+}
+
+bool mtfComm::checkCRC(*uint8_t buffer, uint8_t size)
+{
+	//Comprobaremos la recepción correcta de un mensaje con el CRC.
+	uint8_t auxCrc = calculateCRC(buffer, size);
+	if(auxCrc!=buffer[size-1])
+	{
+		Serial.print(F("Bad CRC received: Expected "));
+		Serial.print(auxCrc);
+		Serial.print(F(" and received "));
+		Serial.println(buffer[size-1]);
+	}
+	return auxCrc==buffer[size-1];
 }
